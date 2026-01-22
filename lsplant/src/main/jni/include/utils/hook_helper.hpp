@@ -24,6 +24,13 @@ struct Function;
 template <FixedString Sym, typename Ret, typename... Args>
 struct Function<Sym, Ret(Args...)> {
     [[gnu::always_inline]] static Ret operator()(Args... args) {
+        if (inner_.raw_function_ == nullptr) [[unlikely]] {
+            if constexpr (std::is_void_v<Ret>) {
+                return;
+            } else {
+                return {};
+            }
+        }
         return inner_.function_(args...);
     }
     [[gnu::always_inline]] operator bool() { return inner_.raw_function_; }

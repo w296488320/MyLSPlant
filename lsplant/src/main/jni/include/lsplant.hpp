@@ -40,6 +40,8 @@ struct InitInfo {
     /// \note It should be able to resolve symbols from both .dynsym and .symtab.
     using ArtSymbolPrefixResolver = std::function<void *(std::string_view symbol_prefix)>;
 
+    using MemMapFunc = std::function<void*(void* addr, size_t length, int prot, int flags, int fd, off_t offset)>;
+    using MemUnmapFunc = std::function<int(void* addr, size_t length)>;
     /// \brief The inline hooker function. Must not be null.
     InlineHookFunType inline_hooker;
     /// \brief The inline unhooker function. Must not be null.
@@ -49,7 +51,8 @@ struct InitInfo {
 
     /// \brief The symbol prefix resolver to \p libart.so. May be null.
     ArtSymbolPrefixResolver art_symbol_prefix_resolver;
-
+    MemMapFunc mem_map = nullptr;
+    MemUnmapFunc mem_unmap = nullptr;
     /// \brief The generated class name. Must not be empty. It contains a field and a method
     /// and they could be set by \p generated_field_name and \p generated_method_name respectively.
     std::string_view generated_class_name = "LSPHooker_";

@@ -118,6 +118,20 @@ std::string generated_source_name;
 std::string generated_field_name;
 std::string generated_method_name;
 
+std::function<void*(void*, size_t, int, int, int, off_t)> g_mem_map = nullptr;
+std::function<int(void*, size_t)> g_mem_unmap = nullptr;
+void* MyMmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    if (g_mem_map) {
+        return g_mem_map(addr, length, prot, flags, fd, offset);
+    }
+    return mmap(addr, length, prot, flags, fd, offset);
+}
+int MyMunmap(void* addr, size_t length) {
+    if (g_mem_unmap) {
+       return g_mem_unmap(addr, length);
+    }
+    return munmap(addr, length);
+}
 bool InitConfig(const InitInfo &info) {
     if (info.generated_class_name.empty()) {
         LOGE("generated class name cannot be empty");
@@ -133,6 +147,8 @@ bool InitConfig(const InitInfo &info) {
         LOGE("generated method name cannot be empty");
         return false;
     }
+    g_mem_map = info.mem_map;
+    g_mem_unmap = info.mem_unmap;
     generated_method_name = info.generated_method_name;
     generated_source_name = info.generated_source_name;
     return true;
@@ -423,8 +439,11 @@ std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject
             env, dex_file_class, dex_file_init,
             JNI_NewDirectByteBuffer(env, const_cast<void *>(image.ptr()), image.size()));
     } else {
-        void *target =
-            mmap(nullptr, image.size(), PROT_WRITE | PROT_READ, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        void *target = MyMmap(nullptr, image.size(), PROT_WRITE | PROT_READ, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (target == MAP_FAILED) {
+            LOGE("Failed to mmap for dex image");
+            return {nullptr, nullptr, nullptr, nullptr};
+        }
         memcpy(target, image.ptr(), image.size());
         mprotect(target, image.size(), PROT_READ);
         std::string err_msg;
@@ -494,9 +513,13 @@ void *GenerateTrampolineFor(art::ArtMethod *hook) {
                 trampoline_lock.wait(true, std::memory_order_acquire);
                 continue;
             }
-            address = reinterpret_cast<uintptr_t>(mmap(nullptr, kPageSize,
-                                                       PROT_READ | PROT_WRITE | PROT_EXEC,
-                                                       MAP_ANONYMOUS | MAP_PRIVATE, -1, 0));
+//            address = reinterpret_cast<uintptr_t>(mmap(nullptr, kPageSize,
+//                                                       PROT_READ | PROT_WRITE | PROT_EXEC,
+//                                                       MAP_ANONYMOUS | MAP_PRIVATE, -1, 0));
+            void* raw_mem = MyMmap(nullptr, kPageSize,
+                                   PROT_READ | PROT_WRITE | PROT_EXEC,
+                                   MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+            address = reinterpret_cast<uintptr_t>(raw_mem);
             if (address == reinterpret_cast<uintptr_t>(MAP_FAILED)) {
                 PLOGE("mmap trampoline");
                 trampoline_lock.clear(std::memory_order_release);
