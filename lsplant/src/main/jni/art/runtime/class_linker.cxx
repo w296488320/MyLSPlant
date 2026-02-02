@@ -138,7 +138,14 @@ private:
         <MemBackup auto backup>
         (ClassLinker *thiz, Thread *self, ObjPtr<mirror::Class> mirror_class) static -> void {
             backup(thiz, self, mirror_class);
-            RestoreBackup(mirror_class->GetClassDef(), self);
+            if (mirror_class == nullptr) {
+                return;
+            }
+            const auto* class_def = mirror_class->GetClassDef();
+            if (class_def == nullptr) {
+                return;
+            }
+            RestoreBackup(class_def, self);
         };
 
     inline static auto FixupStaticTrampolinesRaw_ =
