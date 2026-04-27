@@ -6,14 +6,14 @@
 #define LOG_TAG "LSPlant"
 #endif
 
-//#ifdef LOG_DISABLED
-//#define LOGD(...) 0
-//#define LOGV(...) 0
-//#define LOGI(...) 0
-//#define LOGW(...) 0
-//#define LOGE(...) 0
-//#define PLOGE(...) 0
-//#else
+#ifdef LOG_DISABLED
+#define LOGD(...) 0
+#define LOGV(...) 0
+#define LOGI(...) 0
+#define LOGW(...) 0
+#define LOGE(...) 0
+#define PLOGE(...) 0
+#else
 #ifndef NDEBUG
 #define LOGD(fmt, ...)                                                                             \
     __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG,                                                \
@@ -34,4 +34,4 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGF(...) __android_log_print(ANDROID_LOG_FATAL, LOG_TAG, __VA_ARGS__)
 #define PLOGE(fmt, args...) LOGE(fmt " failed with %d: %s", ##args, errno, strerror(errno))
-//#endif
+#endif
