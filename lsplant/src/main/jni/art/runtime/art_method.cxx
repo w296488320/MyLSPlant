@@ -45,7 +45,10 @@ public:
         if (GetMethodShortyL_) {
             return GetMethodShortyL_(env, env->FromReflectedMethod(method));
         }
-        return GetMethodShorty_(env, env->FromReflectedMethod(method));
+        if (GetMethodShorty_) {
+            return GetMethodShorty_(env, env->FromReflectedMethod(method));
+        }
+        return nullptr;
     }
 
     void SetNonCompilable() {
@@ -296,8 +299,7 @@ public:
         if (sdk_int < __ANDROID_API_Q__) kAccFastInterpreterToInterpreterInvoke = 0;
 
         if (!handler(GetMethodShortyL_, true, GetMethodShorty_)) {
-            LOGE("Failed to find GetMethodShorty");
-            return false;
+            LOGW("Failed to find GetMethodShorty, will use reflection shorty fallback");
         }
 
         handler(PrettyMethod_, PrettyMethodStatic_, PrettyMethodMirror_);

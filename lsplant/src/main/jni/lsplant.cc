@@ -101,6 +101,8 @@ jmethodID dex_file_init = nullptr;
 jmethodID load_class = nullptr;
 jmethodID set_accessible = nullptr;
 jclass executable = nullptr;
+jclass method_class = nullptr;
+jclass constructor_class = nullptr;
 
 // for proxy method
 jmethodID method_get_parameter_types = nullptr;
@@ -183,9 +185,19 @@ bool InitJNI(JNIEnv *env) {
         LOGE("Failed to find getParameterTypes method");
         return false;
     }
+    method_class = JNI_NewGlobalRef(env, JNI_FindClass(env, "java/lang/reflect/Method"));
+    if (!method_class) {
+        LOGE("Failed to find Method");
+        return false;
+    }
+    constructor_class =
+        JNI_NewGlobalRef(env, JNI_FindClass(env, "java/lang/reflect/Constructor"));
+    if (!constructor_class) {
+        LOGE("Failed to find Constructor");
+        return false;
+    }
     if (method_get_return_type =
-            JNI_GetMethodID(env, JNI_FindClass(env, "java/lang/reflect/Method"), "getReturnType",
-                            "()Ljava/lang/Class;");
+            JNI_GetMethodID(env, method_class, "getReturnType", "()Ljava/lang/Class;");
         !method_get_return_type) {
         LOGE("Failed to find getReturnType method");
         return false;
@@ -590,10 +602,9 @@ bool DoUnHook(ArtMethod *target, ArtMethod *backup) {
     return true;
 }
 
-std::string GetProxyMethodShorty(JNIEnv *env, jobject proxy_method) {
-    const auto return_type = JNI_CallObjectMethod(env, proxy_method, method_get_return_type);
+std::string GetExecutableShorty(JNIEnv *env, jobject method) {
     const auto parameter_types =
-        JNI_Cast<jobjectArray>(JNI_CallObjectMethod(env, proxy_method, method_get_parameter_types));
+        JNI_Cast<jobjectArray>(JNI_CallObjectMethod(env, method, method_get_parameter_types));
     auto integer_class = JNI_FindClass(env, "java/lang/Integer");
     auto long_class = JNI_FindClass(env, "java/lang/Long");
     auto float_class = JNI_FindClass(env, "java/lang/Float");
@@ -645,7 +656,15 @@ std::string GetProxyMethodShorty(JNIEnv *env, jobject proxy_method) {
         if (JNI_IsSameObject(env, type, void_type)) return 'V';
         return 'L';
     };
-    out += type_to_shorty(return_type);
+    if (JNI_IsInstanceOf(env, method, method_class)) {
+        const auto return_type = JNI_CallObjectMethod(env, method, method_get_return_type);
+        out += type_to_shorty(return_type);
+    } else if (JNI_IsInstanceOf(env, method, constructor_class)) {
+        out += 'V';
+    } else {
+        LOGE("Failed to build shorty: executable is neither Method nor Constructor");
+        return {};
+    }
     for (const auto &param : parameter_types) {
         out += type_to_shorty(param);
     }
@@ -713,13 +732,18 @@ using ::lsplant::IsHooked;
             LOGE("callback_method is not a method of hooker_object");
             return nullptr;
         }
+        const auto *art_shorty = ArtMethod::GetMethodShorty(env, target_method);
+        auto reflection_shorty = art_shorty ? std::string{} : GetExecutableShorty(env, target_method);
+        const auto target_shorty =
+            art_shorty ? std::string_view{art_shorty} : std::string_view{reflection_shorty};
+        if (target_shorty.empty()) {
+            LOGE("Failed to resolve target method shorty");
+            return nullptr;
+        }
         std::tie(built_class, hooker_field, hook_method, backup_method) = WrapScope(
-            env,
-            BuildDex(env, callback_class_loader.get(),
-                     __builtin_expect(is_proxy, 0) ? GetProxyMethodShorty(env, target_method)
-                                                   : ArtMethod::GetMethodShorty(env, target_method),
-                     is_static, target->IsConstructor() ? "constructor" : target_method_name.get(),
-                     class_name.get(), callback_method_name.get()));
+            env, BuildDex(env, callback_class_loader.get(), target_shorty, is_static,
+                          target->IsConstructor() ? "constructor" : target_method_name.get(),
+                          class_name.get(), callback_method_name.get()));
         if (!built_class || !hooker_field || !hook_method || !backup_method) {
             LOGE("Failed to generate hooker");
             return nullptr;
