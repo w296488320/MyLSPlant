@@ -1,0 +1,60 @@
+gradle/wrapper/gradle-wrapper.properties
+  s_a698085fd3f8c8::t_79058c418da615 3 gitai:{"mixed_line_ranges":[],"operations":[{"operation_id":"6a3d5169b7a782940f1d6a82","tool_type":"agent","tool_id":"apply_patch","line_ranges":[{"Single":3}]}]}
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "d7dc6da4088059f1a09f7892e2a06ec6a724714c",
+  "prompts": {},
+  "sessions": {
+    "s_a698085fd3f8c8": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a3d5121b7a782940f1d6a40",
+        "model": "gpt-5.5__max"
+      },
+      "human_author": "Zhenxi233 <296488320@qq.com>"
+    }
+  },
+  "attestation_metadata": {
+    "gradle/wrapper/gradle-wrapper.properties": [
+      {
+        "hash": "s_a698085fd3f8c8::t_79058c418da615",
+        "line_ranges": [
+          {
+            "Single": 3
+          }
+        ],
+        "mixed_line_ranges": [],
+        "operations": [
+          {
+            "operation_id": "6a3d5169b7a782940f1d6a82",
+            "tool_type": "agent",
+            "tool_id": "apply_patch",
+            "line_ranges": [
+              {
+                "Single": 3
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "remote_transcripts": {
+    "s_a698085fd3f8c8": {
+      "tool": "trae",
+      "conversation_id": "6a3d5121b7a782940f1d6a40",
+      "session_id": "6a3d5121b7a782940f1d6a40",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    },
+    "s_a698085fd3f8c8::t_79058c418da615": {
+      "tool": "trae",
+      "conversation_id": "6a3d5121b7a782940f1d6a40",
+      "session_id": "6a3d5121b7a782940f1d6a40",
+      "status": "remote_only",
+      "message": "Remote transcript resolution is not implemented yet for TRAE prompts."
+    }
+  }
+}
