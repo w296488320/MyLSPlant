@@ -20,7 +20,7 @@ import lsparself;
 
 bool init_result;
 
-void* InlineHooker(void* target, void* hooker) {
+void* InlineHooker(void* target, void* hooker, const lsplant::InlineHookInfo*) {
     _make_rwx(target, _page_size);
     void* origin_call;
     if (DobbyHook(target, hooker, &origin_call) == RS_SUCCESS) {

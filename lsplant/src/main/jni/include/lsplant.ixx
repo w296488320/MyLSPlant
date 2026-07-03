@@ -5,6 +5,7 @@ module;
 export module lsplant;
 
 export namespace lsplant::inline v2{
+    using lsplant::v2::InlineHookInfo;
     using lsplant::v2::InitInfo;
     using lsplant::v2::Init;
     using lsplant::v2::Hook;

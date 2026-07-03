@@ -1,5 +1,7 @@
 #pragma once
 
+#include <dlfcn.h>
+
 #include <android/log.h>
 
 #include <concepts>
@@ -159,7 +161,9 @@ private:
     template<FixedString Sym, typename ...Us, template<FixedString, typename...> typename T>
     requires(requires { T<Sym, Us...>::replace_; })
     [[gnu::always_inline]] bool handle(T<Sym, Us...> &hooker, bool match_prefix) const {
-        return hooker = hook(dlsym<Sym>(match_prefix), reinterpret_cast<void *>(hooker.replace_));
+        auto resolved = dlsym_ex<Sym>(match_prefix);
+        return hooker = hook(resolved.address, reinterpret_cast<void *>(hooker.replace_),
+                             Sym.data, resolved.matched_by_prefix);
     }
 
     template <FixedString Sym>
@@ -173,9 +177,37 @@ private:
         return nullptr;
     }
 
-    [[gnu::always_inline]] void *hook(void *original, void *replace) const {
+    struct ResolvedSymbol {
+        void *address = nullptr;
+        bool matched_by_prefix = false;
+    };
+
+    template <FixedString Sym>
+    [[gnu::always_inline]] ResolvedSymbol dlsym_ex(bool match_prefix = false) const {
+        if (auto match = info_.art_symbol_resolver(Sym.data); match) {
+            return {match, false};
+        }
+        if (match_prefix && info_.art_symbol_prefix_resolver) [[likely]] {
+            if (auto match = info_.art_symbol_prefix_resolver(Sym.data); match) {
+                return {match, true};
+            }
+        }
+        return {};
+    }
+
+    [[gnu::always_inline]] void *hook(void *original, void *replace,
+                                      std::string_view symbol_name,
+                                      bool matched_by_prefix) const {
         if (original) [[likely]] {
-            return info_.inline_hooker(original, replace);
+            Dl_info dl_info {};
+            dladdr(original, &dl_info);
+            InlineHookInfo hook_info {
+                .symbol_name = symbol_name,
+                .matched_by_prefix = matched_by_prefix,
+                .library_path = dl_info.dli_fname,
+                .resolved_symbol = dl_info.dli_sname,
+            };
+            return info_.inline_hooker(original, replace, &hook_info);
         }
         return nullptr;
     }

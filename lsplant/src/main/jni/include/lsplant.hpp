@@ -11,14 +11,22 @@ namespace lsplant {
 inline namespace v2 {
 /// \struct InitInfo
 /// \brief Information and configuration that are needed to call #Init()
+struct InlineHookInfo {
+    std::string_view symbol_name;
+    bool matched_by_prefix = false;
+    const char *library_path = nullptr;
+    const char *resolved_symbol = nullptr;
+};
+
 struct InitInfo {
     /// \brief Type of inline hook function.
     /// In \ref std::function form so that user can use lambda expression with capture list.<br>
     /// \p target is the target function to be hooked.<br>
     /// \p hooker is the hooker function to replace the \p target function.<br>
+    /// \p info contains the ART symbol name LSPlant requested and dladdr metadata for \p target.<br>
     /// \p return is the backup function that points to the previous target function.
     /// it should return null if hook fails and nonnull if successes.
-    using InlineHookFunType = std::function<void *(void *target, void *hooker)>;
+    using InlineHookFunType = std::function<void *(void *target, void *hooker, const InlineHookInfo *info)>;
     /// \brief Type of inline unhook function.
     /// In \ref std::function form so that user can use lambda expression with capture list.<br>
     /// \p func is the target function that is previously hooked.<br>
