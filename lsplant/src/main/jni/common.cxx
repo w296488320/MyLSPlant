@@ -128,6 +128,8 @@ SharedHashMap<const art::dex::ClassDef *, phmap::flat_hash_set<art::ArtMethod *>
 
 std::list<std::pair<art::ArtMethod *, art::ArtMethod *>> jit_movements_;
 std::shared_mutex jit_movements_lock_;
+bool enable_jit_code_cache_hook_ = true;
+bool enable_jit_compilation_hooks_ = true;
 
 inline art::ArtMethod *IsHooked(art::ArtMethod * art_method, bool including_backup = false) {
     art::ArtMethod *backup = nullptr;
@@ -173,5 +175,13 @@ inline void RecordDeoptimized(const art::dex::ClassDef *class_def, art::ArtMetho
 inline void RecordJitMovement(art::ArtMethod * target, art::ArtMethod * backup) {
     std::unique_lock lk(jit_movements_lock_);
     jit_movements_.emplace_back(target, backup);
+}
+
+inline bool EnableJitCodeCacheHook() {
+    return enable_jit_code_cache_hook_;
+}
+
+inline bool EnableJitCompilationHooks() {
+    return enable_jit_compilation_hooks_;
 }
 }  // namespace lsplant

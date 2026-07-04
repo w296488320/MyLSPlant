@@ -206,10 +206,42 @@ private:
                 .matched_by_prefix = matched_by_prefix,
                 .library_path = dl_info.dli_fname,
                 .resolved_symbol = dl_info.dli_sname,
+                .purpose = DescribeHookPurpose(symbol_name),
             };
             return info_.inline_hooker(original, replace, &hook_info);
         }
         return nullptr;
+    }
+
+    static const char *DescribeHookPurpose(std::string_view symbol_name) {
+        if (symbol_name.find("Class9SetStatus") != std::string_view::npos) {
+            return "class_initialization_backup_static_entrypoints";
+        }
+        if (symbol_name.find("ShouldUseInterpreterEntrypoint") != std::string_view::npos) {
+            return "preserve_hook_entrypoint_when_art_selects_interpreter_bridge";
+        }
+        if (symbol_name.find("FixupStaticTrampolines") != std::string_view::npos) {
+            return "restore_hooked_static_method_entrypoints_after_class_linking";
+        }
+        if (symbol_name.find("RegisterNative") != std::string_view::npos) {
+            return "redirect_native_registration_from_hooked_method_to_backup";
+        }
+        if (symbol_name.find("UnregisterNative") != std::string_view::npos) {
+            return "redirect_native_unregistration_from_hooked_method_to_backup";
+        }
+        if (symbol_name.find("AdjustThreadVisibilityCounter") != std::string_view::npos ||
+            symbol_name.find("MarkVisiblyInitialized") != std::string_view::npos) {
+            return "restore_static_entrypoints_when_visible_initialized_callback_runs";
+        }
+        if (symbol_name.find("GarbageCollectCache") != std::string_view::npos ||
+            symbol_name.find("DoCollection") != std::string_view::npos) {
+            return "optional_jit_code_cache_movement_before_cache_gc";
+        }
+        if (symbol_name.find("EnqueueOptimizedCompilation") != std::string_view::npos ||
+            symbol_name.find("AddCompileTask") != std::string_view::npos) {
+            return "optional_jit_compile_task_propagation_for_hook_backup_methods";
+        }
+        return "art_runtime_support";
     }
 };
 

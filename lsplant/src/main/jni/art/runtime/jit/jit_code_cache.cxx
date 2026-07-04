@@ -45,6 +45,10 @@ export class JitCodeCache {
 
 public:
     static bool Init(const HookHandler &handler) {
+        if (!EnableJitCodeCacheHook()) {
+            LOGD("Skip optional JIT code cache hooks by InitInfo.enable_jit_code_cache_hook=false");
+            return true;
+        }
         auto sdk_int = GetAndroidApiLevel();
         if (sdk_int >= __ANDROID_API_O__) [[likely]] {
             if (!handler(MoveObsoleteMethod_)) [[unlikely]] {

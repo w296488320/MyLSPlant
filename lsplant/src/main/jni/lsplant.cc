@@ -151,6 +151,8 @@ bool InitConfig(const InitInfo &info) {
     }
     g_mem_map = info.mem_map;
     g_mem_unmap = info.mem_unmap;
+    enable_jit_code_cache_hook_ = info.enable_jit_code_cache_hook;
+    enable_jit_compilation_hooks_ = info.enable_jit_compilation_hooks;
     generated_method_name = info.generated_method_name;
     generated_source_name = info.generated_source_name;
     return true;

@@ -16,6 +16,7 @@ struct InlineHookInfo {
     bool matched_by_prefix = false;
     const char *library_path = nullptr;
     const char *resolved_symbol = nullptr;
+    const char *purpose = nullptr;
 };
 
 struct InitInfo {
@@ -61,6 +62,17 @@ struct InitInfo {
     ArtSymbolPrefixResolver art_symbol_prefix_resolver;
     MemMapFunc mem_map = nullptr;
     MemUnmapFunc mem_unmap = nullptr;
+    /// \brief Enable optional JIT code cache ART hooks.
+    ///
+    /// This improves long-running JIT movement handling, but it costs one extra inline hook.
+    /// A stealth HWBP backend can disable them to keep LSPlant initialization within limited
+    /// hardware breakpoint slots.
+    bool enable_jit_code_cache_hook = true;
+    /// \brief Enable optional JIT compilation queue ART hooks.
+    ///
+    /// This is useful for propagating compile tasks from backup ArtMethods, but it costs another
+    /// inline hook on Android versions where ART still exposes that path.
+    bool enable_jit_compilation_hooks = true;
     /// \brief The generated class name. Must not be empty. It contains a field and a method
     /// and they could be set by \p generated_field_name and \p generated_method_name respectively.
     std::string_view generated_class_name = "LSPHooker_";

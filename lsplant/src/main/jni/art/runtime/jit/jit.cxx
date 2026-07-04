@@ -43,6 +43,10 @@ export class Jit {
 
 public:
     static bool Init(const HookHandler &handler) {
+        if (!EnableJitCompilationHooks()) {
+            LOGD("Skip optional JIT compilation hooks by InitInfo.enable_jit_compilation_hooks=false");
+            return true;
+        }
         auto sdk_int = GetAndroidApiLevel();
 
         if (sdk_int <= __ANDROID_API_U__) [[likely]] {
