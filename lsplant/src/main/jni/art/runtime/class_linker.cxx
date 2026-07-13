@@ -24,7 +24,24 @@ private:
         "_ZN3art11ClassLinker30ShouldUseInterpreterEntrypointEPNS_9ArtMethodEPKv"_sym.hook->*[]
         <Backup auto backup>
         (ArtMethod *art_method, const void *quick_code)static -> bool {
-            if (quick_code != nullptr && IsHooked(art_method)) [[unlikely]] {
+            /*
+             * ART/nterp does not always pass a non-null quick_code when it is about to
+             * route an interpreted invoke to the callee.  Android 15/16 default
+             * interface methods are one example: invoke-interface can resolve a hooked
+             * boot method (such as java.util.Map.compute) with quick_code == nullptr,
+             * then choose the interpreter entrypoint and execute the original bytecode
+             * directly.  That bypasses the LSPlant trampoline stored in the target
+             * ArtMethod entrypoint, so Java hooks appear "installed" but never run.
+             *
+             * A method recorded in hooked_methods_ has already had its entrypoint
+             * replaced by GenerateTrampolineFor(hook).  As long as that entrypoint is
+             * present, the hook contract is that every invocation must land in the
+             * trampoline regardless of whether ART found a separate quick_code value
+             * for the method.  Keep backup/deoptimized methods unchanged: IsHooked()
+             * intentionally does not treat backup ArtMethods as hooked unless asked to.
+             */
+            //if (quick_code != nullptr && IsHooked(art_method)) [[unlikely]] {
+            if (IsHooked(art_method) && art_method->GetEntryPoint() != nullptr) [[unlikely]] {
                 return false;
             }
             return backup(art_method, quick_code);
