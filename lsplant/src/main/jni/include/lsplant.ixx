@@ -8,6 +8,7 @@ export namespace lsplant::inline v2{
     using lsplant::v2::InlineHookInfo;
     using lsplant::v2::InitInfo;
     using lsplant::v2::Init;
+    using lsplant::v2::GetLastInitError;
     using lsplant::v2::Hook;
     using lsplant::v2::UnHook;
     using lsplant::v2::IsHooked;

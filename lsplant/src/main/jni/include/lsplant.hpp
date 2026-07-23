@@ -2,8 +2,9 @@
 
 #include <jni.h>
 
-#include <string_view>
 #include <functional>
+#include <string>
+#include <string_view>
 
 /// \namespace lsplant
 namespace lsplant {
@@ -98,6 +99,10 @@ struct InitInfo {
 /// \see InitInfo.
 [[nodiscard, maybe_unused, gnu::visibility("default")]] bool Init(JNIEnv *env,
                                                                   const InitInfo &info);
+
+/// \brief Get the reason for the last failed initialization.
+/// \return Empty string if the last real initialization succeeded or no failure reason was recorded.
+[[nodiscard, maybe_unused, gnu::visibility("default")]] std::string GetLastInitError();
 
 /// \brief Hook a Java method by providing the \p target_method together with the context object
 /// \p hooker_object and its callback \p callback_method.

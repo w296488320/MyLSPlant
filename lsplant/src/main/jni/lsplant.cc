@@ -11,8 +11,11 @@ module;
 #include <array>
 #include <atomic>
 #include <bit>
+#include <mutex>
+#include <string>
 #include <string_view>
 #include <tuple>
+#include <utility>
 
 #include "logging.hpp"
 
@@ -98,7 +101,9 @@ jmethodID class_get_declared_constructors = nullptr;
 jfieldID class_access_flags = nullptr;
 jmethodID dex_file_init_with_cl = nullptr;
 jmethodID dex_file_init = nullptr;
+jmethodID in_memory_dex_class_loader_init = nullptr;
 jmethodID load_class = nullptr;
+jmethodID class_loader_load_class = nullptr;
 jmethodID set_accessible = nullptr;
 jclass executable = nullptr;
 jclass method_class = nullptr;
@@ -113,7 +118,8 @@ jmethodID path_class_loader_init = nullptr;
 constexpr auto kInternalMethods = std::make_tuple(
     &method_get_name, &method_get_declaring_class, &class_get_name, &class_get_class_loader,
     &class_get_declared_constructors, &dex_file_init, &dex_file_init_with_cl, &load_class,
-    &set_accessible, &method_get_parameter_types, &method_get_return_type, &path_class_loader_init);
+    &class_loader_load_class, &in_memory_dex_class_loader_init, &set_accessible,
+    &method_get_parameter_types, &method_get_return_type, &path_class_loader_init);
 
 std::string generated_class_name;
 std::string generated_source_name;
@@ -122,6 +128,32 @@ std::string generated_method_name;
 
 std::function<void*(void*, size_t, int, int, int, off_t)> g_mem_map = nullptr;
 std::function<int(void*, size_t)> g_mem_unmap = nullptr;
+std::once_flag g_init_once;
+bool g_init_result = false;
+std::mutex g_last_init_error_mutex;
+std::string g_last_init_error;
+
+void SetLastInitError(std::string reason) {
+    std::lock_guard<std::mutex> lock(g_last_init_error_mutex);
+    g_last_init_error = std::move(reason);
+}
+
+void ClearLastInitError() {
+    std::lock_guard<std::mutex> lock(g_last_init_error_mutex);
+    g_last_init_error.clear();
+}
+
+std::string GetLastInitErrorCopy() {
+    std::lock_guard<std::mutex> lock(g_last_init_error_mutex);
+    return g_last_init_error;
+}
+
+bool FailInit(std::string reason) {
+    LOGE("%s", reason.c_str());
+    SetLastInitError(std::move(reason));
+    return false;
+}
+
 void* MyMmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
     if (g_mem_map) {
         return g_mem_map(addr, length, prot, flags, fd, offset);
@@ -136,18 +168,15 @@ int MyMunmap(void* addr, size_t length) {
 }
 bool InitConfig(const InitInfo &info) {
     if (info.generated_class_name.empty()) {
-        LOGE("generated class name cannot be empty");
-        return false;
+        return FailInit("generated class name cannot be empty");
     }
     generated_class_name = info.generated_class_name;
     if (info.generated_field_name.empty()) {
-        LOGE("generated field name cannot be empty");
-        return false;
+        return FailInit("generated field name cannot be empty");
     }
     generated_field_name = info.generated_field_name;
     if (info.generated_method_name.empty()) {
-        LOGE("generated method name cannot be empty");
-        return false;
+        return FailInit("generated method name cannot be empty");
     }
     g_mem_map = info.mem_map;
     g_mem_unmap = info.mem_unmap;
@@ -166,89 +195,84 @@ bool InitJNI(JNIEnv *env) {
         executable = JNI_NewGlobalRef(env, JNI_FindClass(env, "java/lang/reflect/AbstractMethod"));
     }
     if (!executable) {
-        LOGE("Failed to found Executable/AbstractMethod");
-        return false;
+        return FailInit("Failed to found Executable/AbstractMethod");
     }
 
     if (method_get_name = JNI_GetMethodID(env, executable, "getName", "()Ljava/lang/String;");
         !method_get_name) {
-        LOGE("Failed to find getName method");
-        return false;
+        return FailInit("Failed to find getName method");
     }
     if (method_get_declaring_class =
             JNI_GetMethodID(env, executable, "getDeclaringClass", "()Ljava/lang/Class;");
         !method_get_declaring_class) {
-        LOGE("Failed to find getDeclaringClass method");
-        return false;
+        return FailInit("Failed to find getDeclaringClass method");
     }
     if (method_get_parameter_types =
             JNI_GetMethodID(env, executable, "getParameterTypes", "()[Ljava/lang/Class;");
         !method_get_parameter_types) {
-        LOGE("Failed to find getParameterTypes method");
-        return false;
+        return FailInit("Failed to find getParameterTypes method");
     }
     method_class = JNI_NewGlobalRef(env, JNI_FindClass(env, "java/lang/reflect/Method"));
     if (!method_class) {
-        LOGE("Failed to find Method");
-        return false;
+        return FailInit("Failed to find Method");
     }
     constructor_class =
         JNI_NewGlobalRef(env, JNI_FindClass(env, "java/lang/reflect/Constructor"));
     if (!constructor_class) {
-        LOGE("Failed to find Constructor");
-        return false;
+        return FailInit("Failed to find Constructor");
     }
     if (method_get_return_type =
             JNI_GetMethodID(env, method_class, "getReturnType", "()Ljava/lang/Class;");
         !method_get_return_type) {
-        LOGE("Failed to find getReturnType method");
-        return false;
+        return FailInit("Failed to find getReturnType method");
     }
     auto clazz = JNI_FindClass(env, "java/lang/Class");
     if (!clazz) {
-        LOGE("Failed to find Class");
-        return false;
+        return FailInit("Failed to find Class");
     }
 
     if (class_get_class_loader =
             JNI_GetMethodID(env, clazz, "getClassLoader", "()Ljava/lang/ClassLoader;");
         !class_get_class_loader) {
-        LOGE("Failed to find getClassLoader");
-        return false;
+        return FailInit("Failed to find getClassLoader");
     }
 
     if (class_get_declared_constructors = JNI_GetMethodID(env, clazz, "getDeclaredConstructors",
                                                           "()[Ljava/lang/reflect/Constructor;");
         !class_get_declared_constructors) {
-        LOGE("Failed to find getDeclaredConstructors");
-        return false;
+        return FailInit("Failed to find getDeclaredConstructors");
     }
 
     if (class_get_name = JNI_GetMethodID(env, clazz, "getName", "()Ljava/lang/String;");
         !class_get_name) {
-        LOGE("Failed to find getName");
-        return false;
+        return FailInit("Failed to find getName");
     }
 
     if (class_access_flags = JNI_GetFieldID(env, clazz, "accessFlags", "I"); !class_access_flags) {
-        LOGE("Failed to find Class.accessFlags");
-        return false;
+        return FailInit("Failed to find Class.accessFlags");
     }
     auto path_class_loader = JNI_FindClass(env, "dalvik/system/PathClassLoader");
     if (!path_class_loader) {
-        LOGE("Failed to find PathClassLoader");
-        return false;
+        return FailInit("Failed to find PathClassLoader");
     }
     if (path_class_loader_init = JNI_GetMethodID(env, path_class_loader, "<init>",
                                                  "(Ljava/lang/String;Ljava/lang/ClassLoader;)V");
         !path_class_loader_init) {
-        LOGE("Failed to find PathClassLoader.<init>");
-        return false;
+        return FailInit("Failed to find PathClassLoader.<init>");
+    }
+    auto class_loader_class = JNI_FindClass(env, "java/lang/ClassLoader");
+    if (!class_loader_class) {
+        return FailInit("Failed to find ClassLoader");
+    }
+    if (class_loader_load_class =
+            JNI_GetMethodID(env, class_loader_class, "loadClass",
+                            "(Ljava/lang/String;)Ljava/lang/Class;");
+        !class_loader_load_class) {
+        return FailInit("Failed to find ClassLoader.loadClass");
     }
     auto dex_file_class = JNI_FindClass(env, "dalvik/system/DexFile");
     if (!dex_file_class) {
-        LOGE("Failed to find DexFile");
-        return false;
+        return FailInit("Failed to find DexFile");
     }
     if (sdk_int >= __ANDROID_API_Q__) {
         dex_file_init_with_cl = JNI_GetMethodID(
@@ -258,25 +282,32 @@ bool InitJNI(JNIEnv *env) {
         dex_file_init = JNI_GetMethodID(env, dex_file_class, "<init>", "(Ljava/nio/ByteBuffer;)V");
     }
     if (sdk_int >= __ANDROID_API_O__ && !dex_file_init_with_cl && !dex_file_init) {
-        LOGE("Failed to find DexFile.<init>");
-        return false;
+        auto in_memory_dex_class_loader =
+            JNI_FindClass(env, "dalvik/system/InMemoryDexClassLoader");
+        if (!in_memory_dex_class_loader) {
+            return FailInit("Failed to find InMemoryDexClassLoader");
+        }
+        in_memory_dex_class_loader_init =
+            JNI_GetMethodID(env, in_memory_dex_class_loader, "<init>",
+                            "([Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V");
+        if (!in_memory_dex_class_loader_init) {
+            return FailInit("Failed to find DexFile.<init> or InMemoryDexClassLoader.<init>");
+        }
+        LOGW("DexFile.<init> not found, fallback to InMemoryDexClassLoader");
     }
     if (load_class =
             JNI_GetMethodID(env, dex_file_class, "loadClass",
                             "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/Class;");
         !load_class) {
-        LOGE("Failed to find a suitable way to load class");
-        return false;
+        return FailInit("Failed to find a suitable way to load class");
     }
     auto accessible_object = JNI_FindClass(env, "java/lang/reflect/AccessibleObject");
     if (!accessible_object) {
-        LOGE("Failed to find AccessibleObject");
-        return false;
+        return FailInit("Failed to find AccessibleObject");
     }
     if (set_accessible = JNI_GetMethodID(env, accessible_object, "setAccessible", "(Z)V");
         !set_accessible) {
-        LOGE("Failed to find AccessibleObject.setAccessible");
-        return false;
+        return FailInit("Failed to find AccessibleObject.setAccessible");
     }
     return true;
 }
@@ -289,53 +320,41 @@ inline void UpdateTrampoline(uint8_t offset) {
 
 bool InitNative(JNIEnv *env, const HookHandler &handler) {
     if (!ArtMethod::Init(env, handler)) {
-        LOGE("Failed to init art method");
-        return false;
+        return FailInit("Failed to init art method");
     }
     UpdateTrampoline(ArtMethod::GetEntryPointOffset());
     if (!Thread::Init(handler)) {
-        LOGE("Failed to init thread");
-        return false;
+        return FailInit("Failed to init thread");
     }
     if (!Class::Init(handler)) {
-        LOGE("Failed to init mirror class");
-        return false;
+        return FailInit("Failed to init mirror class");
     }
     if (!Runtime::Init(handler)) {
-        LOGE("Failed to init runtime");
-        return false;
+        return FailInit("Failed to init runtime");
     }
     if (!ClassLinker::Init(env, handler)) {
-        LOGE("Failed to init class linker");
-        return false;
+        return FailInit("Failed to init class linker");
     }
     if (!ScopedSuspendAll::Init(handler)) {
-        LOGE("Failed to init scoped suspend all");
-        return false;
+        return FailInit("Failed to init scoped suspend all");
     }
     if (!ScopedGCCriticalSection::Init(handler)) {
-        LOGE("Failed to init scoped gc critical section");
-        return false;
+        return FailInit("Failed to init scoped gc critical section");
     }
     if (!JitCodeCache::Init(handler)) {
-        LOGE("Failed to init jit code cache");
-        return false;
+        return FailInit("Failed to init jit code cache");
     }
     if (!Jit::Init(handler)) {
-        LOGE("Failed to init jit");
-        return false;
+        return FailInit("Failed to init jit");
     }
     if (!DexFile::Init(env, handler)) {
-        LOGE("Failed to init dex file");
-        return false;
+        return FailInit("Failed to init dex file");
     }
     if (!Instrumentation::Init(env, handler)) {
-        LOGE("Failed to init instrumentation");
-        return false;
+        return FailInit("Failed to init instrumentation");
     }
     if (!JniIdManager::Init(env, handler)) {
-        LOGE("Failed to init jni id manager");
-        return false;
+        return FailInit("Failed to init jni id manager");
     }
 
     // This should always be the last one
@@ -440,18 +459,36 @@ std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject
     jclass target_class = nullptr;
 
     ScopedLocalRef<jobject> java_dex_file{nullptr};
+    ScopedLocalRef<jobject> in_memory_class_loader{nullptr};
+
+    auto new_direct_dex_buffer = [&] {
+        return JNI_NewDirectByteBuffer(env, const_cast<void *>(image.ptr()), image.size());
+    };
+    auto new_dex_buffers = [&] {
+        auto byte_buffer_class = JNI_FindClass(env, "java/nio/ByteBuffer");
+        auto direct_dex_buffer = new_direct_dex_buffer();
+        if (!byte_buffer_class || !direct_dex_buffer) {
+            return ScopedLocalRef<jobjectArray>(env);
+        }
+        return JNI_NewObjectArray(env, 1, byte_buffer_class, direct_dex_buffer);
+    };
 
     if (auto dex_file_class = JNI_FindClass(env, "dalvik/system/DexFile"); dex_file_init_with_cl) {
         java_dex_file = JNI_NewObject(
-            env, dex_file_class, dex_file_init_with_cl,
-            JNI_NewObjectArray(
-                env, 1, JNI_FindClass(env, "java/nio/ByteBuffer"),
-                JNI_NewDirectByteBuffer(env, const_cast<void *>(image.ptr()), image.size())),
-            nullptr, nullptr);
+            env, dex_file_class, dex_file_init_with_cl, new_dex_buffers(), nullptr, nullptr);
     } else if (dex_file_init) {
-        java_dex_file = JNI_NewObject(
-            env, dex_file_class, dex_file_init,
-            JNI_NewDirectByteBuffer(env, const_cast<void *>(image.ptr()), image.size()));
+        java_dex_file = JNI_NewObject(env, dex_file_class, dex_file_init,
+                                      new_direct_dex_buffer());
+    } else if (in_memory_dex_class_loader_init) {
+        if (auto in_memory_dex_class_loader =
+                JNI_FindClass(env, "dalvik/system/InMemoryDexClassLoader")) {
+            in_memory_class_loader =
+                JNI_NewObject(env, in_memory_dex_class_loader, in_memory_dex_class_loader_init,
+                              new_dex_buffers(), class_loader);
+        }
+        if (!in_memory_class_loader) {
+            LOGE("Failed to create InMemoryDexClassLoader");
+        }
     } else {
         void *target = MyMmap(nullptr, image.size(), PROT_WRITE | PROT_READ, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
         if (target == MAP_FAILED) {
@@ -471,8 +508,14 @@ std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject
         }
     }
 
-    if (auto path_class_loader = JNI_FindClass(env, "dalvik/system/PathClassLoader");
-        java_dex_file) {
+    if (in_memory_class_loader) {
+        target_class =
+            JNI_Cast<jclass>(
+                JNI_CallObjectMethod(env, in_memory_class_loader, class_loader_load_class,
+                                     JNI_NewStringUTF(env, generated_class_name.data())))
+                .release();
+    } else if (auto path_class_loader = JNI_FindClass(env, "dalvik/system/PathClassLoader");
+               java_dex_file) {
         auto my_cl = JNI_NewObject(env, path_class_loader, path_class_loader_init,
                                    JNI_NewStringUTF(env, ""), class_loader);
         target_class =
@@ -679,13 +722,36 @@ extern "C++" {
 
 using ::lsplant::IsHooked;
 
+[[maybe_unused]] std::string GetLastInitError() {
+    return GetLastInitErrorCopy();
+}
+
 [[maybe_unused]] bool Init(JNIEnv *env, const InitInfo &info) {
-    if (!info.inline_hooker || !info.inline_unhooker || !info.art_symbol_resolver ||
-        !info.art_symbol_prefix_resolver) {
-        return false;
+    if (!env) {
+        return FailInit("JNIEnv is null");
     }
-    bool static kInit = InitConfig(info) && InitJNI(env) && InitNative(env, info);
-    return kInit;
+    if (!info.inline_hooker) {
+        return FailInit("InitInfo.inline_hooker is null");
+    }
+    if (!info.inline_unhooker) {
+        return FailInit("InitInfo.inline_unhooker is null");
+    }
+    if (!info.art_symbol_resolver) {
+        return FailInit("InitInfo.art_symbol_resolver is null");
+    }
+    if (!info.art_symbol_prefix_resolver) {
+        return FailInit("InitInfo.art_symbol_prefix_resolver is null");
+    }
+    std::call_once(g_init_once, [&] {
+        ClearLastInitError();
+        g_init_result = InitConfig(info) && InitJNI(env) && InitNative(env, info);
+        if (g_init_result) {
+            ClearLastInitError();
+        } else if (GetLastInitErrorCopy().empty()) {
+            SetLastInitError("LSPlant initialization failed without detail");
+        }
+    });
+    return g_init_result;
 }
 
 [[maybe_unused]] jobject Hook(JNIEnv *env, jobject target_method, jobject hooker_object,
