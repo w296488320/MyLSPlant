@@ -1,8 +1,8 @@
 module;
 
 #include <atomic>
-#include <string>
 #include <memory>
+#include <string>
 
 #include "logging.hpp"
 
@@ -12,7 +12,19 @@ import :common;
 import hook_helper;
 
 export namespace lsplant::art {
+
+struct alignas(4) [[gnu::packed]] QuickMethodFrameInfo {
+    [[maybe_unused]] uint32_t frame_size_in_bytes;
+    [[maybe_unused]] uint32_t core_spill_mask;
+    [[maybe_unused]] uint32_t fp_spill_mask;
+};
+
 class ArtMethod {
+    inline static ArtMethod *abstract_method_{};
+
+    inline static auto SetNotIntrinsic_ =
+        "_ZN3art9ArtMethod15SetNotIntrinsicEv"_sym.as<void (ArtMethod::*)()>;
+
     inline static auto PrettyMethod_ =
             "_ZN3art9ArtMethod12PrettyMethodEPS0_b"_sym.as<std::string(ArtMethod::*)(bool)>;
 
@@ -33,6 +45,15 @@ class ArtMethod {
 
     inline static auto art_interpreter_to_compiled_code_bridge_ =
             "artInterpreterToCompiledCodeBridge"_sym.as<void()>;
+
+    inline static auto GetQuickFrameInfo_ =
+        "_ZN3art9ArtMethod17GetQuickFrameInfoEv"_sym.hook->*
+        []<MemBackup auto backup>(ArtMethod *thiz) static -> QuickMethodFrameInfo {
+        if (proxied_backup_methods_.contains(thiz)) [[unlikely]] {
+            return backup(abstract_method_);
+        }
+        return backup(thiz);
+    };
 
     inline void ThrowInvocationTimeError() {
         if (ThrowInvocationTimeError_) {
@@ -106,12 +127,23 @@ public:
         SetAccessFlags(access_flags);
     }
 
+    void SetNonIntrinsic() {
+        if (SetNotIntrinsic_) [[likely]] {
+            SetNotIntrinsic_(this);
+        } else if (kAccIntrinsic) [[likely]] {
+            auto access_flags = GetAccessFlags();
+            access_flags &= ~kAccIntrinsic;
+            SetAccessFlags(access_flags);
+        }
+    }
+
     bool IsPrivate() { return GetAccessFlags() & kAccPrivate; }
     bool IsProtected() { return GetAccessFlags() & kAccProtected; }
     bool IsPublic() { return GetAccessFlags() & kAccPublic; }
     bool IsFinal() { return GetAccessFlags() & kAccFinal; }
     bool IsStatic() { return GetAccessFlags() & kAccStatic; }
     bool IsNative() { return GetAccessFlags() & kAccNative; }
+    bool IsAbstract() { return GetAccessFlags() & kAccAbstract; }
     bool IsConstructor() { return GetAccessFlags() & kAccConstructor; }
 
     void CopyFrom(const ArtMethod *other) { memcpy(this, other, art_method_size); }
@@ -192,19 +224,19 @@ public:
     static bool Init(JNIEnv *env, const HookHandler handler) {
         auto sdk_int = GetAndroidApiLevel();
         ScopedLocalRef<jclass> executable{env, nullptr};
-        if (sdk_int >= __ANDROID_API_O__) {
+        if (sdk_int >= kSdkOreo) {
             executable = JNI_FindClass(env, "java/lang/reflect/Executable");
-        } else if (sdk_int >= __ANDROID_API_M__) {
+        } else if (sdk_int >= kSdkMarshmallow) {
             executable = JNI_FindClass(env, "java/lang/reflect/AbstractMethod");
         } else {
             executable = JNI_FindClass(env, "java/lang/reflect/ArtMethod");
         }
         if (!executable) {
-            LOGE("Failed to found Executable/AbstractMethod/ArtMethod");
+            LOGE("Failed to find Executable/AbstractMethod/ArtMethod");
             return false;
         }
 
-        if (sdk_int >= __ANDROID_API_M__) [[likely]] {
+        if (sdk_int >= kSdkMarshmallow) [[likely]] {
             if (art_method_field = JNI_GetFieldID(env, executable, "artMethod", "J");
                 !art_method_field) {
                 LOGE("Failed to find artMethod field");
@@ -214,7 +246,7 @@ public:
 
         auto throwable = JNI_FindClass(env, "java/lang/Throwable");
         if (!throwable) {
-            LOGE("Failed to found Executable");
+            LOGE("Failed to find Throwable");
             return false;
         }
         auto clazz = JNI_FindClass(env, "java/lang/Class");
@@ -234,8 +266,8 @@ public:
         art_method_size = reinterpret_cast<uintptr_t>(second) - reinterpret_cast<uintptr_t>(first);
         LOGD("ArtMethod size: %zu", art_method_size);
 
-        if (RoundUpTo(4 * 9, kPointerSize) + kPointerSize * 3 < art_method_size) [[unlikely]] {
-            if (sdk_int >= __ANDROID_API_M__) {
+        if (__builtin_align_up(4 * 9, kPointerSize) + kPointerSize * 3 < art_method_size) [[unlikely]] {
+            if (sdk_int >= kSdkMarshmallow) {
                 LOGW("ArtMethod size exceeds maximum assume. There may be something wrong.");
             }
         }
@@ -243,7 +275,7 @@ public:
         entry_point_offset = art_method_size - kPointerSize;
         data_offset = entry_point_offset - kPointerSize;
 
-        if (sdk_int >= __ANDROID_API_M__) [[likely]] {
+        if (sdk_int >= kSdkMarshmallow) [[likely]] {
             if (auto access_flags_field = JNI_GetFieldID(env, executable, "accessFlags", "I");
                 access_flags_field) {
                 uint32_t real_flags = JNI_GetIntField(env, first_ctor, access_flags_field);
@@ -278,7 +310,7 @@ public:
             access_flags_offset = get_offset_from_art_method("accessFlags", "I");
             declaring_class_offset =
                 get_offset_from_art_method("declaringClass", "Ljava/lang/Class;");
-            if (sdk_int == __ANDROID_API_L__) {
+            if (sdk_int == kSdkLollipop) {
                 entry_point_offset =
                     get_offset_from_art_method("entryPointFromQuickCompiledCode", "J");
                 interpreter_entry_point_offset =
@@ -291,12 +323,17 @@ public:
         LOGD("ArtMethod::data offset: %zu", data_offset);
         LOGD("ArtMethod::access_flags offset: %zu", access_flags_offset);
 
-        if (sdk_int < __ANDROID_API_R__) {
+        if (sdk_int < kSdkR) {
             kAccPreCompiled = 0;
-        } else if (sdk_int >= __ANDROID_API_S__) {
+        } else if (sdk_int >= kSdkS) {
             kAccPreCompiled = 0x00800000;
         }
-        if (sdk_int < __ANDROID_API_Q__) kAccFastInterpreterToInterpreterInvoke = 0;
+        if (sdk_int < kSdkQ) kAccFastInterpreterToInterpreterInvoke = 0;
+        if (sdk_int < kSdkOreo) kAccIntrinsic = 0;
+
+        if (sdk_int >= kSdkPie && !handler(SetNotIntrinsic_)) {
+            LOGW("Failed to find SetNotIntrinsic, use hard-coded kAccIntrinsic instead");
+        }
 
         if (!handler(GetMethodShortyL_, true, GetMethodShorty_)) {
             LOGW("Failed to find GetMethodShorty, will use reflection shorty fallback");
@@ -304,13 +341,13 @@ public:
 
         handler(PrettyMethod_, PrettyMethodStatic_, PrettyMethodMirror_);
 
-        if (sdk_int <= __ANDROID_API_O__) [[unlikely]] {
+        if (sdk_int <= kSdkOreo) [[unlikely]] {
             auto abstract_method_error = JNI_FindClass(env, "java/lang/AbstractMethodError");
             if (!abstract_method_error) {
                 LOGE("Failed to find AbstractMethodError");
                 return false;
             }
-            if (sdk_int == __ANDROID_API_O__) [[unlikely]] {
+            if (sdk_int == kSdkOreo) [[unlikely]] {
                 auto executable_get_name =
                     JNI_GetMethodID(env, executable, "getName", "()Ljava/lang/String;");
                 if (!executable_get_name) {
@@ -332,14 +369,29 @@ public:
                 kAccCompileDontBother = kAccDefaultConflict;
             }
         }
-        if (sdk_int < __ANDROID_API_N__) {
+        if (sdk_int == kSdkMarshmallow) [[unlikely]] {
+            auto executable_get_name =
+                JNI_GetMethodID(env, executable, "getName", "()Ljava/lang/String;");
+            if (!executable_get_name) {
+                LOGE("Failed to find Executable.getName");
+                return false;
+            }
+            abstract_method_ = FromReflectedMethod(
+                env, JNI_ToReflectedMethod(env, executable, executable_get_name, false).get());
+            if (!abstract_method_ || !abstract_method_->IsAbstract()) [[unlikely]] {
+                LOGW("Abstract method Executable.getName not found");
+            } else if (!handler(GetQuickFrameInfo_)) [[unlikely]] {
+                LOGW("Failed to hook GetQuickFrameInfo, hooking proxy method may crash");
+            }
+        }
+        if (sdk_int < kSdkNougat) {
             kAccCompileDontBother = 0;
         }
-        if (sdk_int <= __ANDROID_API_M__) [[unlikely]] {
+        if (sdk_int <= kSdkMarshmallow) [[unlikely]] {
             if (!handler(art_interpreter_to_compiled_code_bridge_)) {
                 return false;
             }
-            if (sdk_int >= __ANDROID_API_L_MR1__) {
+            if (sdk_int >= kSdkLollipopMr1) {
                 interpreter_entry_point_offset = entry_point_offset - 2 * kPointerSize;
             }
         }
@@ -349,13 +401,14 @@ public:
 
     static size_t GetEntryPointOffset() { return entry_point_offset; }
 
-    constexpr static uint32_t kAccPublic = 0x0001;     // class, field, method, ic
-    constexpr static uint32_t kAccPrivate = 0x0002;    // field, method, ic
-    constexpr static uint32_t kAccProtected = 0x0004;  // field, method, ic
-    constexpr static uint32_t kAccStatic = 0x0008;     // field, method, ic
-    constexpr static uint32_t kAccNative = 0x0100;     // method
-    constexpr static uint32_t kAccFinal = 0x0010;      // class, field, method, ic
-    constexpr static uint32_t kAccConstructor = 0x00010000;
+    constexpr static uint32_t kAccPublic = 0x0001;           // class, field, method, ic
+    constexpr static uint32_t kAccPrivate = 0x0002;          // field, method, ic
+    constexpr static uint32_t kAccProtected = 0x0004;        // field, method, ic
+    constexpr static uint32_t kAccStatic = 0x0008;           // field, method, ic
+    constexpr static uint32_t kAccNative = 0x0100;           // method
+    constexpr static uint32_t kAccFinal = 0x0010;            // class, field, method, ic
+    constexpr static uint32_t kAccAbstract = 0x0400;         // class, method, ic
+    constexpr static uint32_t kAccConstructor = 0x00010000;  // method (dex only) <(cl)init>
 
 private:
     inline static jfieldID art_method_field = nullptr;
@@ -369,6 +422,7 @@ private:
     inline static uint32_t kAccPreCompiled = 0x00200000;
     inline static uint32_t kAccCompileDontBother = 0x02000000;
     inline static uint32_t kAccDefaultConflict = 0x01000000;
+    inline static uint32_t kAccIntrinsic = 0x80000000;
 };
 
 }  // namespace lsplant::art

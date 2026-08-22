@@ -3,14 +3,18 @@ module;
 #include "lsplant.hpp"
 
 #include <android/api-level.h>
-#include <bits/sysconf.h>
+#include <fcntl.h>
 #include <jni.h>
+#include <linux/ashmem.h>
 #include <sys/mman.h>
-#include <sys/system_properties.h>
+#include <sys/utsname.h>
+#include <syscall.h>
+#include <unistd.h>
 
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -43,6 +47,7 @@ using art::ArtMethod;
 using art::ClassLinker;
 using art::DexFile;
 using art::Instrumentation;
+using art::JavaDebuggableGuard;
 using art::Runtime;
 using art::Thread;
 using art::gc::ScopedGCCriticalSection;
@@ -51,8 +56,8 @@ using art::jit::JitCodeCache;
 using art::jni::JniIdManager;
 using art::mirror::Class;
 using art::thread_list::ScopedSuspendAll;
-using art::JavaDebuggableGuard;
 
+using namespace std::string_literals;
 using namespace std::string_view_literals;
 
 namespace {
@@ -62,28 +67,28 @@ inline consteval auto operator""_uarr() {
 }
 
 consteval inline auto GetTrampoline() {
-    if constexpr (kArch == Arch::kArm) {
+    if constexpr (is_arch_v<Arch::kArm>) {
         return std::make_tuple("\x00\x00\x9f\xe5\x00\xf0\x90\xe5\x78\x56\x34\x12"_uarr,
                                // NOLINTNEXTLINE
                                uint8_t{32u}, uintptr_t{8u});
     }
-    if constexpr (kArch == Arch::kArm64) {
+    if constexpr (is_arch_v<Arch::kAArch64>) {
         return std::make_tuple(
             "\x60\x00\x00\x58\x10\x00\x40\xf8\x00\x02\x1f\xd6\x78\x56\x34\x12\x78\x56\x34\x12"_uarr,
             // NOLINTNEXTLINE
             uint8_t{44u}, uintptr_t{12u});
     }
-    if constexpr (kArch == Arch::kX86) {
+    if constexpr (is_arch_v<Arch::kX86>) {
         return std::make_tuple("\xb8\x78\x56\x34\x12\xff\x70\x00\xc3"_uarr,
                                // NOLINTNEXTLINE
                                uint8_t{56u}, uintptr_t{1u});
     }
-    if constexpr (kArch == Arch::kX86_64) {
+    if constexpr (is_arch_v<Arch::kAmd64>) {
         return std::make_tuple("\x48\xbf\x78\x56\x34\x12\x78\x56\x34\x12\xff\x77\x00\xc3"_uarr,
                                // NOLINTNEXTLINE
                                uint8_t{96u}, uintptr_t{2u});
     }
-    if constexpr (kArch == Arch::kRiscv64) {
+    if constexpr (is_arch_v<Arch::kRiscv64>) {
         return std::make_tuple(
             "\x17\x05\x00\x00\x03\x35\x05\x01\x83\x3f\x05\x00\x67\x80\x0f\x00\x78\x56\x34\x12\x78\x56\x34\x12"_uarr,
             // NOLINTNEXTLINE
@@ -126,8 +131,10 @@ std::string generated_source_name;
 std::string generated_field_name;
 std::string generated_method_name;
 
-std::function<void*(void*, size_t, int, int, int, off_t)> g_mem_map = nullptr;
-std::function<int(void*, size_t)> g_mem_unmap = nullptr;
+std::function<void *(void *, size_t, int, int, int, off_t)> g_mem_map = nullptr;
+std::function<int(void *, size_t)> g_mem_unmap = nullptr;
+InitInfo::MemoryAllocator executable_memory_allocator;
+InitInfo::MemoryRecycler executable_memory_recycler;
 std::once_flag g_init_once;
 bool g_init_result = false;
 std::mutex g_last_init_error_mutex;
@@ -154,48 +161,54 @@ bool FailInit(std::string reason) {
     return false;
 }
 
-void* MyMmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
+void *MyMmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
     if (g_mem_map) {
         return g_mem_map(addr, length, prot, flags, fd, offset);
     }
     return mmap(addr, length, prot, flags, fd, offset);
 }
-int MyMunmap(void* addr, size_t length) {
+[[maybe_unused]] int MyMunmap(void *addr, size_t length) {
     if (g_mem_unmap) {
-       return g_mem_unmap(addr, length);
+        return g_mem_unmap(addr, length);
     }
     return munmap(addr, length);
 }
+
 bool InitConfig(const InitInfo &info) {
     if (info.generated_class_name.empty()) {
         return FailInit("generated class name cannot be empty");
     }
-    generated_class_name = info.generated_class_name;
     if (info.generated_field_name.empty()) {
         return FailInit("generated field name cannot be empty");
     }
-    generated_field_name = info.generated_field_name;
     if (info.generated_method_name.empty()) {
         return FailInit("generated method name cannot be empty");
     }
+    if (info.executable_memory_allocator && !info.executable_memory_recycler) {
+        return FailInit("executable memory recycler cannot be null");
+    }
+    generated_class_name = info.generated_class_name;
+    generated_field_name = info.generated_field_name;
     g_mem_map = info.mem_map;
     g_mem_unmap = info.mem_unmap;
     enable_jit_code_cache_hook_ = info.enable_jit_code_cache_hook;
     enable_jit_compilation_hooks_ = info.enable_jit_compilation_hooks;
     generated_method_name = info.generated_method_name;
     generated_source_name = info.generated_source_name;
+    executable_memory_allocator = info.executable_memory_allocator;
+    executable_memory_recycler = info.executable_memory_recycler;
     return true;
 }
 
 bool InitJNI(JNIEnv *env) {
     int sdk_int = GetAndroidApiLevel();
-    if (sdk_int >= __ANDROID_API_O__) {
+    if (sdk_int >= kSdkOreo) {
         executable = JNI_NewGlobalRef(env, JNI_FindClass(env, "java/lang/reflect/Executable"));
     } else {
         executable = JNI_NewGlobalRef(env, JNI_FindClass(env, "java/lang/reflect/AbstractMethod"));
     }
     if (!executable) {
-        return FailInit("Failed to found Executable/AbstractMethod");
+        return FailInit("Failed to find Executable/AbstractMethod");
     }
 
     if (method_get_name = JNI_GetMethodID(env, executable, "getName", "()Ljava/lang/String;");
@@ -274,14 +287,14 @@ bool InitJNI(JNIEnv *env) {
     if (!dex_file_class) {
         return FailInit("Failed to find DexFile");
     }
-    if (sdk_int >= __ANDROID_API_Q__) {
+    if (sdk_int >= kSdkQ) {
         dex_file_init_with_cl = JNI_GetMethodID(
             env, dex_file_class, "<init>",
             "([Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;[Ldalvik/system/DexPathList$Element;)V");
-    } else if (sdk_int >= __ANDROID_API_O__) {
+    } else if (sdk_int >= kSdkOreo) {
         dex_file_init = JNI_GetMethodID(env, dex_file_class, "<init>", "(Ljava/nio/ByteBuffer;)V");
     }
-    if (sdk_int >= __ANDROID_API_O__ && !dex_file_init_with_cl && !dex_file_init) {
+    if (sdk_int >= kSdkOreo && !dex_file_init_with_cl && !dex_file_init) {
         auto in_memory_dex_class_loader =
             JNI_FindClass(env, "dalvik/system/InMemoryDexClassLoader");
         if (!in_memory_dex_class_loader) {
@@ -490,8 +503,9 @@ std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject
             LOGE("Failed to create InMemoryDexClassLoader");
         }
     } else {
-        void *target = MyMmap(nullptr, image.size(), PROT_WRITE | PROT_READ, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-        if (target == MAP_FAILED) {
+        void *target = MyMmap(nullptr, image.size(), PROT_WRITE | PROT_READ,
+                              MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        if (!target || target == MAP_FAILED) {
             LOGE("Failed to mmap for dex image");
             return {nullptr, nullptr, nullptr, nullptr};
         }
@@ -517,7 +531,7 @@ std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject
     } else if (auto path_class_loader = JNI_FindClass(env, "dalvik/system/PathClassLoader");
                java_dex_file) {
         auto my_cl = JNI_NewObject(env, path_class_loader, path_class_loader_init,
-                                   JNI_NewStringUTF(env, ""), class_loader);
+                                   JNI_NewStringUTF(env, "."), class_loader);
         target_class =
             JNI_Cast<jclass>(
                 JNI_CallObjectMethod(env, java_dex_file, load_class,
@@ -553,32 +567,176 @@ static_assert(std::atomic_uintptr_t::is_always_lock_free, "Unsupported architect
 
 std::atomic_uintptr_t trampoline_pool{0};
 std::atomic_flag trampoline_lock{false};
-constexpr size_t kTrampolineSize = RoundUpTo(sizeof(trampoline), kPointerSize);
-constexpr uintptr_t kAddressMask = 0xFFFU;
+constexpr size_t kTrampolineSize = __builtin_align_up(trampoline.size(), kPointerSize);
+const auto kPageSize = static_cast<size_t>(getpagesize());  // assume
+const auto kPageMask = static_cast<uintptr_t>(kPageSize - 1);
+
+SharedHashSet<void *> mmap_regions;
+SharedHashSet<void *> dual_regions;
+
+auto [ashmem_device_path, use_memfd] = [] {
+    if (utsname un{}; GetAndroidApiLevel() >= kSdkQ && uname(&un) == 0) [[likely]] {
+        static constexpr uintptr_t kRequiredMajor = 3;
+        static constexpr uintptr_t kRequiredMinor = 17;
+
+        char *minor_str = nullptr;
+        auto major = strtoul(un.release, &minor_str, 10);
+        auto minor = minor_str ? strtoul(minor_str + 1, nullptr, 10) : 0UL;
+
+        if (major > kRequiredMajor || (major == kRequiredMajor && minor > kRequiredMinor))
+            [[likely]] {
+            return std::pair{std::string{}, true};
+        }
+    }
+    if (auto fd = open("/proc/sys/kernel/random/boot_id", O_RDONLY | O_CLOEXEC, 0); fd >= 0)
+        [[likely]] {
+        std::array<char, 36> boot_id;
+        auto size = read(fd, boot_id.data(), boot_id.size());
+        close(fd);
+        if (size == boot_id.size()) {
+            auto path = "/dev/ashmem"s + std::string{boot_id.data(), boot_id.size()};
+            if (access(path.c_str(), F_OK) == 0) [[likely]] {
+                return std::pair{path, false};
+            }
+        }
+    }
+    return std::pair{"/dev/ashmem"s, false};
+}();
+
+std::pair<void *, void *> CreateDualMapping(int fd) {
+    auto reserved_size = kPageSize * 2;
+    auto *reserved = static_cast<uint8_t *>(
+        mmap(nullptr, reserved_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    if (reserved == MAP_FAILED) [[unlikely]] {
+        PLOGE("mmap reserved memory");
+        return {};
+    }
+
+    auto *executable_memory =
+        mmap(reserved, kPageSize, PROT_READ | PROT_EXEC, MAP_SHARED | MAP_FIXED, fd, 0);
+    auto *writable_memory = mmap(reserved + kPageSize, kPageSize, PROT_READ | PROT_WRITE,
+                                 MAP_SHARED | MAP_FIXED, fd, 0);
+    if (executable_memory == MAP_FAILED || writable_memory == MAP_FAILED) [[unlikely]] {
+        PLOGE("mmap dual mapping");
+        munmap(reserved, reserved_size);
+        return {};
+    }
+
+    dual_regions.emplace(reserved);
+    return {executable_memory, writable_memory};
+}
+
+void *AllocateMemoryFromMemfd() {
+    auto memfd = static_cast<int>(syscall(__NR_memfd_create, "", 0));
+    if (memfd < 0) [[unlikely]] {
+        PLOGE("create memfd");
+        return nullptr;
+    }
+    if (ftruncate(memfd, kPageSize) < 0) [[unlikely]] {
+        PLOGE("truncate memfd");
+        close(memfd);
+        return nullptr;
+    }
+
+    auto [executable_memory, writable_memory] = CreateDualMapping(memfd);
+    close(memfd);
+    if (!executable_memory || !writable_memory) [[unlikely]] {
+        return nullptr;
+    }
+
+    LOGV("memfd regions: r-xs = %p, rw-s = %p", executable_memory, writable_memory);
+    return executable_memory;
+}
+
+void *AllocateMemoryFromAshmem() {
+    auto ashmem = open(ashmem_device_path.c_str(), O_RDWR | O_CLOEXEC, 0);
+    if (ashmem < 0) [[unlikely]] {
+        PLOGE("open ashmem");
+        return nullptr;
+    }
+    if (ioctl(ashmem, ASHMEM_SET_SIZE, kPageSize) < 0) [[unlikely]] {
+        PLOGE("truncate ashmem");
+        close(ashmem);
+        return nullptr;
+    }
+
+    auto [executable_memory, writable_memory] = CreateDualMapping(ashmem);
+    close(ashmem);
+    if (!executable_memory || !writable_memory) [[unlikely]] {
+        return nullptr;
+    }
+
+    LOGV("ashmem regions: r-xs = %p, rw-s = %p, source = %s", executable_memory, writable_memory,
+         ashmem_device_path.c_str());
+    return executable_memory;
+}
+
+void *AllocateMemory() {
+    if (g_mem_map) {
+        auto *memory = MyMmap(nullptr, kPageSize, PROT_READ | PROT_WRITE | PROT_EXEC,
+                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (!memory || memory == MAP_FAILED) [[unlikely]] {
+            LOGE("custom mmap trampoline failed");
+            return nullptr;
+        }
+        mmap_regions.emplace(memory);
+        LOGV("memory allocated from custom mmap: %p", memory);
+        return memory;
+    }
+
+    if (use_memfd) [[likely]] {
+        if (auto *memory = AllocateMemoryFromMemfd()) [[likely]] {
+            LOGV("memory allocated from memfd: %p", memory);
+            return memory;
+        }
+        use_memfd = false;
+    }
+
+    if (!ashmem_device_path.empty()) [[likely]] {
+        if (auto *memory = AllocateMemoryFromAshmem()) [[likely]] {
+            LOGV("memory allocated from ashmem: %p", memory);
+            return memory;
+        }
+        ashmem_device_path = {};
+    }
+
+    auto *memory = mmap(nullptr, kPageSize, PROT_READ | PROT_WRITE | PROT_EXEC,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (memory == MAP_FAILED) [[unlikely]] {
+        PLOGE("mmap trampoline");
+        return nullptr;
+    }
+    mmap_regions.emplace(memory);
+    LOGV("memory allocated from mmap: %p", memory);
+    return memory;
+}
 
 void *GenerateTrampolineFor(art::ArtMethod *hook) {
-    static const size_t kPageSize = sysconf(_SC_PAGESIZE);  // assume
+    auto data = trampoline;
+    *reinterpret_cast<ArtMethod **>(data.data() + art_method_offset) = hook;
+
+    if (executable_memory_allocator) {
+        if (auto *memory = static_cast<char *>(executable_memory_allocator(data))) [[likely]] {
+            __builtin___clear_cache(memory, memory + data.size());
+            LOGV("memory allocated from user: %p", memory);
+            return memory;
+        }
+    }
+
     static const size_t kTrampolineNumPerPage = kPageSize / kTrampolineSize;
     unsigned count;
     uintptr_t address;
     while (true) {
         auto tl = Trampoline{.address = trampoline_pool.fetch_add(1, std::memory_order_release)};
         count = kPageSize == 16384 ? tl.count16k : tl.count4k;
-        address = tl.address & ~kAddressMask;
+        address = tl.address & ~kPageMask;
         if (address == 0 || count >= kTrampolineNumPerPage) {
             if (trampoline_lock.test_and_set(std::memory_order_acq_rel)) {
                 trampoline_lock.wait(true, std::memory_order_acquire);
                 continue;
             }
-//            address = reinterpret_cast<uintptr_t>(mmap(nullptr, kPageSize,
-//                                                       PROT_READ | PROT_WRITE | PROT_EXEC,
-//                                                       MAP_ANONYMOUS | MAP_PRIVATE, -1, 0));
-            void* raw_mem = MyMmap(nullptr, kPageSize,
-                                   PROT_READ | PROT_WRITE | PROT_EXEC,
-                                   MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-            address = reinterpret_cast<uintptr_t>(raw_mem);
-            if (address == reinterpret_cast<uintptr_t>(MAP_FAILED)) {
-                PLOGE("mmap trampoline");
+            address = reinterpret_cast<uintptr_t>(AllocateMemory());
+            if (!address) [[unlikely]] {
                 trampoline_lock.clear(std::memory_order_release);
                 trampoline_lock.notify_all();
                 return nullptr;
@@ -596,11 +754,13 @@ void *GenerateTrampolineFor(art::ArtMethod *hook) {
         break;
     }
     auto *address_ptr = reinterpret_cast<char *>(address);
-    std::memcpy(address_ptr, trampoline.data(), trampoline.size());
+    if (dual_regions.contains(__builtin_align_down(address_ptr, kPageSize))) [[likely]] {
+        std::memcpy(address_ptr + kPageSize, data.data(), data.size());
+    } else {
+        std::memcpy(address_ptr, data.data(), data.size());
+    }
 
-    *reinterpret_cast<art::ArtMethod **>(address_ptr + art_method_offset) = hook;
-
-    __builtin___clear_cache(address_ptr, reinterpret_cast<char *>(address + trampoline.size()));
+    __builtin___clear_cache(address_ptr, reinterpret_cast<char *>(address + data.size()));
 
     return address_ptr;
 }
@@ -618,6 +778,8 @@ bool DoHook(ArtMethod *target, ArtMethod *hook, ArtMethod *backup) {
         // NOLINTNEXTLINE
     } else {
         LOGV("Generated trampoline %p", entrypoint);
+
+        target->SetNonIntrinsic();
 
         target->BackupTo(backup);
 
@@ -639,8 +801,14 @@ bool DoUnHook(ArtMethod *target, ArtMethod *backup) {
     ScopedSuspendAll suspend("LSPlant Hook", false);
     LOGV("Unhooking: target = %p, backup = %p", target, backup);
     auto access_flags = target->GetAccessFlags();
+    auto *entry_point = target->GetEntryPoint();
     target->CopyFrom(backup);
     target->SetAccessFlags(access_flags);
+    if (auto *start = __builtin_align_down(entry_point, kPageSize); executable_memory_recycler &&
+                                                                    !mmap_regions.contains(start) &&
+                                                                    !dual_regions.contains(start)) {
+        executable_memory_recycler(entry_point);
+    }
     LOGV("Done unhook: target(%p:0x%x) -> %p; backup(%p:0x%x) -> %p;", target,
          target->GetAccessFlags(), target->GetEntryPoint(), backup, backup->GetAccessFlags(),
          backup->GetEntryPoint());
@@ -818,8 +986,8 @@ using ::lsplant::IsHooked;
         }
     }
 
-    auto reflected_hook = JNI_ToReflectedMethod(env, built_class, hook_method, is_static);
-    auto reflected_backup = JNI_ToReflectedMethod(env, built_class, backup_method, is_static);
+    auto reflected_hook = JNI_ToReflectedMethod(env, built_class, hook_method, JNI_TRUE);
+    auto reflected_backup = JNI_ToReflectedMethod(env, built_class, backup_method, JNI_TRUE);
 
     JNI_CallVoidMethod(env, reflected_backup, set_accessible, JNI_TRUE);
 
@@ -840,6 +1008,8 @@ using ::lsplant::IsHooked;
         RecordHooked(target, target->GetDeclaringClass()->GetClassDef(), global_backup, backup);
         if (!is_proxy) [[likely]] {
             RecordJitMovement(target, backup);
+        } else {
+            proxied_backup_methods_.emplace(backup);
         }
         // Always record backup as deoptimized since we dont want its entrypoint to be updated
         // by FixupStaticTrampolines on hooker class
@@ -868,6 +1038,7 @@ using ::lsplant::IsHooked;
     }
     // FIXME: not atomic, but should be fine
     hooked_methods_.erase(backup);
+    proxied_backup_methods_.erase(backup);
     hooked_classes_.erase_if(target->GetDeclaringClass()->GetClassDef(), [&target](auto &it) {
         it.second.erase(target);
         return it.second.empty();
@@ -933,9 +1104,9 @@ using ::lsplant::IsHooked;
     }
     const auto constructors =
         JNI_Cast<jobjectArray>(JNI_CallObjectMethod(env, target, class_get_declared_constructors));
-    uint8_t access_flags = JNI_GetIntField(env, target, class_access_flags);
-    constexpr static uint32_t kAccFinal = 0x0010;
-    JNI_SetIntField(env, target, class_access_flags, static_cast<jint>(access_flags & ~kAccFinal));
+    auto access_flags = JNI_GetIntField(env, target, class_access_flags);
+    constexpr static jint kAccFinal = 0x0010;
+    JNI_SetIntField(env, target, class_access_flags, access_flags & ~kAccFinal);
     for (const auto &constructor : constructors) {
         auto *method = ArtMethod::FromReflectedMethod(env, constructor.get());
         if (method && !method->IsPublic() && !method->IsProtected()) method->SetProtected();

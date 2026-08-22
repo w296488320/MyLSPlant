@@ -16,9 +16,6 @@ export namespace lsplant::art::mirror {
 
 class Class {
 private:
-    inline static auto GetDescriptor_ =
-        "_ZN3art6mirror5Class13GetDescriptorEPNSt3__112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE"_sym.as<const char *(Class::*)(std::string *)>;
-
     inline static auto GetClassDef_ =
             "_ZN3art6mirror5Class11GetClassDefEv"_sym.as<const dex::ClassDef *(Class::*)()>;
 
@@ -101,13 +98,13 @@ private:
 
 public:
     static bool Init(const HookHandler &handler) {
-        if (!handler(GetDescriptor_) || !handler(GetClassDef_)) {
+        if (!handler(GetClassDef_)) {
             return false;
         }
 
         int sdk_int = GetAndroidApiLevel();
 
-        if (sdk_int < __ANDROID_API_O__) {
+        if (sdk_int < kSdkOreo) {
             if (!handler(SetStatus_, ClassSetStatus_)) {
                 return false;
             }
@@ -117,24 +114,17 @@ public:
             }
         }
 
-        if (sdk_int >= __ANDROID_API_R__) {
+        if (sdk_int >= kSdkR) {
             initialized_status = 15;
-        } else if (sdk_int >= __ANDROID_API_P__) {
+        } else if (sdk_int >= kSdkPie) {
             initialized_status = 14;
-        } else if (sdk_int == __ANDROID_API_O_MR1__) {
+        } else if (sdk_int == kSdkOreoMr1) {
             initialized_status = 11;
         } else {
             initialized_status = 10;
         }
 
         return true;
-    }
-
-    const char *GetDescriptor(std::string *storage) { return GetDescriptor_(this, storage); }
-
-    std::string GetDescriptor() {
-        std::string storage;
-        return GetDescriptor(&storage);
     }
 
     const dex::ClassDef *GetClassDef() { return GetClassDef_(this); }

@@ -13,6 +13,7 @@ module;
 export module lsplant:common;
 export import jni_helper;
 export import hook_helper;
+export import type_traits;
 
 export namespace lsplant {
 
@@ -27,30 +28,6 @@ class ClassDef {};
 
 }  // namespace art
 
-enum class Arch {
-    kArm,
-    kArm64,
-    kX86,
-    kX86_64,
-    kRiscv64,
-};
-
-consteval inline Arch GetArch() {
-#if defined(__i386__)
-    return Arch::kX86;
-#elif defined(__x86_64__)
-    return Arch::kX86_64;
-#elif defined(__arm__)
-    return Arch::kArm;
-#elif defined(__aarch64__)
-    return Arch::kArm64;
-#elif defined(__riscv)
-    return Arch::kRiscv64;
-#else
-#error "unsupported architecture"
-#endif
-}
-
 template <class K, class V, class Hash = phmap::priv::hash_default_hash<K>,
           class Eq = phmap::priv::hash_default_eq<K>,
           class Alloc = phmap::priv::Allocator<phmap::priv::Pair<const K, V>>, size_t N = 4>
@@ -61,28 +38,38 @@ template <class T, class Hash = phmap::priv::hash_default_hash<T>,
           size_t N = 4>
 using SharedHashSet = phmap::parallel_flat_hash_set<T, Hash, Eq, Alloc, N, std::shared_mutex>;
 
-constexpr auto kArch = GetArch();
-
-template <typename T>
-constexpr inline auto RoundUpTo(T v, size_t size) {
-    return v + size - 1 - ((v + size - 1) & (size - 1));
-}
+constexpr int kSdkLollipop = 21;
+constexpr int kSdkLollipopMr1 = 22;
+constexpr int kSdkMarshmallow = 23;
+constexpr int kSdkNougat = 24;
+constexpr int kSdkNougatMr1 = 25;
+constexpr int kSdkOreo = 26;
+constexpr int kSdkOreoMr1 = 27;
+constexpr int kSdkPie = 28;
+constexpr int kSdkQ = 29;
+constexpr int kSdkR = 30;
+constexpr int kSdkS = 31;
+constexpr int kSdkSv2 = 32;
+constexpr int kSdkTiramisu = 33;
+constexpr int kSdkUpsideDownCake = 34;
+constexpr int kSdkVanillaIceCream = 35;
+constexpr int kSdkBaklava = 36;
+constexpr int kSdkCinnamonBun = 37;
 
 [[gnu::const]] inline auto GetAndroidApiLevel() {
-    static auto kApiLevel = []() {
+    static auto kApiLevel = [] {
         std::array<char, PROP_VALUE_MAX> prop_value;
         __system_property_get("ro.build.version.sdk", prop_value.data());
-        int base = atoi(prop_value.data());
-        __system_property_get("ro.build.version.preview_sdk", prop_value.data());
-        return base + atoi(prop_value.data());
+        return atoi(prop_value.data());
     }();
+    [[assume(kApiLevel >= __ANDROID_API__)]];
     return kApiLevel;
 }
 
-inline auto IsJavaDebuggable(JNIEnv * env) {
+inline auto IsJavaDebuggable(JNIEnv *env) {
     static auto kDebuggable = [&env]() {
         auto sdk_int = GetAndroidApiLevel();
-        if (sdk_int < __ANDROID_API_P__) {
+        if (sdk_int < kSdkPie) {
             return false;
         }
         auto runtime_class = JNI_FindClass(env, "dalvik/system/VMRuntime");
@@ -90,14 +77,13 @@ inline auto IsJavaDebuggable(JNIEnv * env) {
             LOGE("Failed to find VMRuntime");
             return false;
         }
-        auto get_runtime_method = JNI_GetStaticMethodID(env, runtime_class, "getRuntime",
-                                                        "()Ldalvik/system/VMRuntime;");
+        auto get_runtime_method =
+            JNI_GetStaticMethodID(env, runtime_class, "getRuntime", "()Ldalvik/system/VMRuntime;");
         if (!get_runtime_method) {
             LOGE("Failed to find VMRuntime.getRuntime()");
             return false;
         }
-        auto is_debuggable_method =
-            JNI_GetMethodID(env, runtime_class, "isJavaDebuggable", "()Z");
+        auto is_debuggable_method = JNI_GetMethodID(env, runtime_class, "isJavaDebuggable", "()Z");
         if (!is_debuggable_method) {
             LOGE("Failed to find VMRuntime.isJavaDebuggable()");
             return false;
@@ -118,20 +104,21 @@ constexpr auto kPointerSize = sizeof(void *);
 
 SharedHashMap<art::ArtMethod *, std::pair<jobject, art::ArtMethod *>> hooked_methods_;
 
-SharedHashMap<const art::dex::ClassDef *, phmap::flat_hash_set<art::ArtMethod *>>
-    hooked_classes_;
+SharedHashMap<const art::dex::ClassDef *, phmap::flat_hash_set<art::ArtMethod *>> hooked_classes_;
 
 SharedHashSet<art::ArtMethod *> deoptimized_methods_set_;
 
 SharedHashMap<const art::dex::ClassDef *, phmap::flat_hash_set<art::ArtMethod *>>
     deoptimized_classes_;
 
+SharedHashSet<art::ArtMethod *> proxied_backup_methods_;
+
 std::list<std::pair<art::ArtMethod *, art::ArtMethod *>> jit_movements_;
 std::shared_mutex jit_movements_lock_;
 bool enable_jit_code_cache_hook_ = true;
 bool enable_jit_compilation_hooks_ = true;
 
-inline art::ArtMethod *IsHooked(art::ArtMethod * art_method, bool including_backup = false) {
+inline art::ArtMethod *IsHooked(art::ArtMethod *art_method, bool including_backup = false) {
     art::ArtMethod *backup = nullptr;
     hooked_methods_.if_contains(art_method, [&backup, &including_backup](const auto &it) {
         if (including_backup || it.second.first) backup = it.second.second;
@@ -139,7 +126,7 @@ inline art::ArtMethod *IsHooked(art::ArtMethod * art_method, bool including_back
     return backup;
 }
 
-inline art::ArtMethod *IsBackup(art::ArtMethod * art_method) {
+inline art::ArtMethod *IsBackup(art::ArtMethod *art_method) {
     art::ArtMethod *backup = nullptr;
     hooked_methods_.if_contains(art_method, [&backup](const auto &it) {
         if (!it.second.first) backup = it.second.second;
@@ -147,7 +134,7 @@ inline art::ArtMethod *IsBackup(art::ArtMethod * art_method) {
     return backup;
 }
 
-inline bool IsDeoptimized(art::ArtMethod * art_method) {
+inline bool IsDeoptimized(art::ArtMethod *art_method) {
     return deoptimized_methods_set_.contains(art_method);
 }
 
@@ -156,7 +143,7 @@ inline std::list<std::pair<art::ArtMethod *, art::ArtMethod *>> GetJitMovements(
     return std::move(jit_movements_);
 }
 
-inline void RecordHooked(art::ArtMethod * target, const art::dex::ClassDef *class_def,
+inline void RecordHooked(art::ArtMethod *target, const art::dex::ClassDef *class_def,
                          jobject reflected_backup, art::ArtMethod *backup) {
     hooked_classes_.lazy_emplace_l(
         class_def, [&target](auto &it) { it.second.emplace(target); },
@@ -168,11 +155,13 @@ inline void RecordHooked(art::ArtMethod * target, const art::dex::ClassDef *clas
 }
 
 inline void RecordDeoptimized(const art::dex::ClassDef *class_def, art::ArtMethod *art_method) {
-    { deoptimized_classes_[class_def].emplace(art_method); }
+    {
+        deoptimized_classes_[class_def].emplace(art_method);
+    }
     deoptimized_methods_set_.insert(art_method);
 }
 
-inline void RecordJitMovement(art::ArtMethod * target, art::ArtMethod * backup) {
+inline void RecordJitMovement(art::ArtMethod *target, art::ArtMethod *backup) {
     std::unique_lock lk(jit_movements_lock_);
     jit_movements_.emplace_back(target, backup);
 }
