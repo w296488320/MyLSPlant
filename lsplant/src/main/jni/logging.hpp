@@ -6,12 +6,15 @@
 #define LOG_TAG "LSPlant"
 #endif
 
-#ifdef LOG_DISABLED
+// Runtime 适配：依赖库所有日志级别共用默认 NOLOG 开关，保留独立构建的 LOG_DISABLED。
+// Runtime adaptation: every dependency log level follows default NOLOG while standalone builds retain LOG_DISABLED.
+#if defined(LOG_DISABLED) || defined(RUNTIME_BUILD_TYPE_NOLOG)
 #define LOGD(...) 0
 #define LOGV(...) 0
 #define LOGI(...) 0
 #define LOGW(...) 0
 #define LOGE(...) 0
+#define LOGF(...) 0
 #define PLOGE(...) 0
 #else
 #ifndef NDEBUG

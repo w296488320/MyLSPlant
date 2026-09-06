@@ -232,6 +232,9 @@ template <typename Func, typename... Args>
 
         ~finally() {
             if (auto exception = ClearException(env_)) {
+                // Runtime 适配：仅关闭 Release 日志，异常清理和局部引用释放仍须执行。
+                // Runtime adaptation: silence only Release logging; exception cleanup and local-reference release must still run.
+#if !defined(RUNTIME_BUILD_TYPE_NOLOG) && !defined(LOG_DISABLED)
                 __android_log_print(ANDROID_LOG_ERROR,
 #ifdef LOG_TAG
                                     LOG_TAG,
@@ -239,6 +242,7 @@ template <typename Func, typename... Args>
                                     "JNIHelper",
 #endif
                                     "%s", JUTFString(env_, exception.get()).get());
+#endif
             }
         }
 
